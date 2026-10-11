@@ -74,3 +74,6 @@ docker/data
 
 .omc/
 .worktrees/
+
+.superpowers/
+.agents/

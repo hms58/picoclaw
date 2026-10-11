@@ -12,13 +12,18 @@ on:
         required: false
         type: boolean
         default: false
+      create_release:
+        description: "Create GitHub Release and upload artifacts"
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   build:
-    name: Build Multi-Platform Packages
+    name: Build multi-platform release artifacts
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
 
     steps:
       - name: Verify tag exists
@@ -56,6 +61,18 @@ jobs:
           cache: pnpm
           cache-dependency-path: web/frontend/pnpm-lock.yaml
 
+      - name: Repair broken pnpm lockfile
+        shell: bash
+        run: |
+          cd web/frontend
+          set -e
+          echo "Checking frontend dependencies..."
+          if ! pnpm install --frozen-lockfile; then
+            echo "pnpm lockfile is broken or invalid; regenerating..."
+            rm -f pnpm-lock.yaml
+            pnpm install
+          fi
+
       - name: Install zip
         run: sudo apt-get install -y zip
 
@@ -70,15 +87,96 @@ jobs:
           GOVERSION: ${{ steps.setup-go.outputs.go-version }}
           INCLUDE_ANDROID_BUNDLE: ${{ inputs.include_android }}
 
-      - name: Package artifacts
+      - name: Package artifacts by platform
+        shell: bash
         run: |
-          mkdir -p release-artifacts
-          cp -r dist/* release-artifacts/ 2>/dev/null || true
-          ls -la release-artifacts/
+          set -e
+          mkdir -p final-artifacts
 
-      - name: Upload artifacts
+          if [ ! -d "dist" ]; then
+            echo "::error::dist directory not found"
+            exit 1
+          fi
+
+          cd dist
+
+          declare -A packages
+
+          for file in *; do
+            if [ -f "$file" ]; then
+              if [[ $file =~ ^picoclaw-launcher_([^_]+)_(.+)$ ]]; then
+                platform="${BASH_REMATCH[1]}"
+                arch_variant="${BASH_REMATCH[2]}"
+                key="${platform}_${arch_variant}"
+                packages["$key"]+="$file "
+              elif [[ $file =~ ^picoclaw_([^_]+)_(.+)$ ]]; then
+                platform="${BASH_REMATCH[1]}"
+                arch_variant="${BASH_REMATCH[2]}"
+                key="${platform}_${arch_variant}"
+                packages["$key"]+="$file "
+              fi
+            fi
+          done
+
+          for key in "${!packages[@]}"; do
+            files=(${packages[$key]})
+
+            if [[ $key == *"Windows"* ]]; then
+              archive_name="picoclaw_${{ inputs.tag }}_${key}.zip"
+              zip -q "../final-artifacts/$archive_name" ${files[@]}
+            else
+              archive_name="picoclaw_${{ inputs.tag }}_${key}.tar.gz"
+              tar czf "../final-artifacts/$archive_name" ${files[@]}
+            fi
+
+            echo "Created: $archive_name"
+          done
+
+          for archive in dist/*.tar.gz dist/*.zip; do
+            if [ -f "$archive" ]; then
+              filename=$(basename "$archive")
+              cp "$archive" "../final-artifacts/picoclaw_${{ inputs.tag }}_${filename%.*}.${filename##*.}"
+              echo "Copied: $(basename "$archive")"
+            fi
+          done
+
+          if [ -f "../build/picoclaw-android-universal.zip" ]; then
+            cp "../build/picoclaw-android-universal.zip" "../final-artifacts/picoclaw_${{ inputs.tag }}_android-universal.zip"
+            echo "Copied: Android universal bundle"
+          fi
+
+          cd ..
+          echo "=== Final Artifacts ==="
+          ls -lh final-artifacts/
+
+      - name: Create GitHub Release and upload all artifacts
+        if: inputs.create_release == true
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ inputs.tag }}
+          name: Release ${{ inputs.tag }}
+          draft: false
+          prerelease: ${{ contains(inputs.tag, 'alpha') || contains(inputs.tag, 'beta') || contains(inputs.tag, 'rc') }}
+          generate_release_notes: true
+          files: final-artifacts/*
+
+      - name: Upload artifacts as workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: picoclaw-${{ inputs.tag }}-packages
-          path: release-artifacts/
+          path: final-artifacts/
           retention-days: 30
+
+      - name: Build Summary
+        shell: bash
+        run: |
+          echo "# 📦 Release Build Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Tag:** \`${{ inputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Android Bundle:** ${{ inputs.include_android }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Release Created:** ${{ inputs.create_release }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Artifacts" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          ls -1 final-artifacts/ | sed 's/^/- /' >> "$GITHUB_STEP_SUMMARY"

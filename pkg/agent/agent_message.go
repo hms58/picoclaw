@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -120,7 +121,11 @@ func (al *AgentLoop) prepareInboundMessageForAgent(
 	return msg
 }
 
-func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage) (string, error) {
+func (al *AgentLoop) processMessage(
+	ctx context.Context,
+	msg bus.InboundMessage,
+	agentOverride ...*AgentInstance,
+) (string, error) {
 	msg = al.prepareInboundMessageForAgent(ctx, msg)
 
 	// Add message preview to log (show full content for error messages)
@@ -149,6 +154,15 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 	route, agent, routeErr := al.resolveMessageRoute(msg)
 	if routeErr != nil {
 		return "", routeErr
+	}
+
+	// Task 12 补丁：调用方显式指定 Agent 时，覆盖路由结果。
+	// route.AgentID 必须与 agent 一并覆盖 —— route 同时决定 allocation.Scope
+	// （写进会话 meta 与 turnContext）与别名，只换 agent 不换 route 会重现
+	// "会话键与能力错配"（spec §5.6 表）。
+	if len(agentOverride) > 0 && agentOverride[0] != nil {
+		agent = agentOverride[0]
+		route.AgentID = agent.ID
 	}
 
 	allocation := al.allocateRouteSession(route, msg)
@@ -313,4 +327,44 @@ func (al *AgentLoop) processSystemMessage(
 		EnableSummary:   false,
 		SendResponse:    true,
 	})
+}
+
+// ErrAgentNotFound is returned by ProcessDirectWithAgent when agentID does not
+// name a registered agent.
+var ErrAgentNotFound = errors.New("agent not found")
+
+// ProcessDirectWithAgent behaves like ProcessDirectWithChannel but targets an
+// explicit agent instead of relying on dispatch rules.
+//
+// Dispatch rules have no agent dimension (pkg/config/config.go:340-348), so
+// ProcessDirectWithChannel always lands on the default agent. Callers that need
+// per-request agent selection must use this method.
+func (al *AgentLoop) ProcessDirectWithAgent(
+	ctx context.Context,
+	content, sessionKey, channel, chatID, agentID string,
+) (string, error) {
+	if err := al.ensureHooksInitialized(ctx); err != nil {
+		return "", err
+	}
+	if err := al.ensureMCPInitialized(ctx); err != nil {
+		return "", err
+	}
+
+	target, ok := al.GetRegistry().GetAgent(agentID)
+	if !ok {
+		return "", fmt.Errorf("%w: %q", ErrAgentNotFound, agentID)
+	}
+
+	msg := bus.InboundMessage{
+		Context: bus.InboundContext{
+			Channel:  channel,
+			ChatID:   chatID,
+			ChatType: "direct",
+			SenderID: "cron",
+		},
+		Content:    content,
+		SessionKey: sessionKey,
+	}
+
+	return al.processMessage(ctx, msg, target)
 }
