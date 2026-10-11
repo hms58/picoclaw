@@ -82,15 +82,76 @@ jobs:
           GOVERSION: ${{ steps.setup-go.outputs.go-version }}
           INCLUDE_ANDROID_BUNDLE: ${{ inputs.include_android }}
 
-      - name: Package artifacts
+      - name: Package artifacts by platform
+        shell: bash
         run: |
-          mkdir -p release-artifacts
-          cp -r dist/* release-artifacts/ 2>/dev/null || true
-          ls -la release-artifacts/
+          mkdir -p final-artifacts
+          
+          # GoReleaser 输出在 dist/ 目录下，按平台+架构组织
+          cd dist
+          
+          # 获取所有不同的平台-架构组合
+          declare -A packages
+          
+          for file in *; do
+            # 跳过目录和非二进制文件（除了已是 tar.gz 或 zip 的）
+            if [ -f "$file" ]; then
+              # 提取平台信息（Linux_x86_64, Windows_x86_64, Darwin_arm64 等）
+              if [[ $file =~ ^picoclaw-launcher_([^_]+)_(.+)$ ]]; then
+                platform="${BASH_REMATCH[1]}"
+                arch_variant="${BASH_REMATCH[2]}"
+                key="${platform}_${arch_variant}"
+                packages["$key"]+="$file "
+              elif [[ $file =~ ^picoclaw_([^_]+)_(.+)$ ]]; then
+                platform="${BASH_REMATCH[1]}"
+                arch_variant="${BASH_REMATCH[2]}"
+                key="${platform}_${arch_variant}"
+                packages["$key"]+="$file "
+              fi
+            fi
+          done
+          
+          # 为每个平台-架构组合创建压缩包
+          for key in "${!packages[@]}"; do
+            files=(${packages[$key]})
+            
+            # 确定压缩格式：Windows 用 zip，其他用 tar.gz
+            if [[ $key == *"Windows"* ]]; then
+              archive_name="picoclaw_${{ inputs.tag }}_${key}.zip"
+              zip -q "../final-artifacts/$archive_name" ${files[@]}
+            else
+              archive_name="picoclaw_${{ inputs.tag }}_${key}.tar.gz"
+              tar czf "../final-artifacts/$archive_name" ${files[@]}
+            fi
+            
+            echo "Created: $archive_name"
+          done
+          
+          cd ..
+          
+          # 处理预构建的归档文件（tar.gz 和 zip）- 直接复制
+          if [ -d "dist" ]; then
+            for archive in dist/*.tar.gz dist/*.zip; do
+              if [ -f "$archive" ]; then
+                filename=$(basename "$archive")
+                cp "$archive" "final-artifacts/picoclaw_${{ inputs.tag }}_${filename%.*}.${filename##*.}"
+                echo "Copied: $(basename $archive)"
+              fi
+            done
+          fi
+          
+          # 处理 Android 包（如果存在）
+          if [ -f "build/picoclaw-android-universal.zip" ]; then
+            cp "build/picoclaw-android-universal.zip" "final-artifacts/picoclaw_${{ inputs.tag }}_android-universal.zip"
+            echo "Copied: Android universal bundle"
+          fi
+          
+          echo "=== Final Artifacts ==="
+          ls -lh final-artifacts/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: picoclaw-${{ inputs.tag }}-packages
-          path: release-artifacts/
+          path: final-artifacts/
           retention-days: 30
