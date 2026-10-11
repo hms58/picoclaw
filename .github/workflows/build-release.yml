@@ -1,0 +1,84 @@
+name: Build Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v0.2.0)"
+        required: true
+        type: string
+      include_android:
+        description: "Include Android bundle"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    name: Build Multi-Platform Packages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Verify tag exists
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh api "repos/${{ github.repository }}/git/ref/tags/${{ inputs.tag }}" --silent 2>/dev/null; then
+            echo "::error::Tag '${{ inputs.tag }}' does not exist. Create it first."
+            exit 1
+          fi
+
+      - name: Checkout tag
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag }}
+
+      - name: Setup Go from go.mod
+        id: setup-go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.33.0
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/frontend/pnpm-lock.yaml
+
+      - name: Install zip
+        run: sudo apt-get install -y zip
+
+      - name: Run GoReleaser (build only)
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: ~> v2
+          args: build --clean --snapshot
+        env:
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          GOVERSION: ${{ steps.setup-go.outputs.go-version }}
+          INCLUDE_ANDROID_BUNDLE: ${{ inputs.include_android }}
+
+      - name: Package artifacts
+        run: |
+          mkdir -p release-artifacts
+          cp -r dist/* release-artifacts/ 2>/dev/null || true
+          ls -la release-artifacts/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: picoclaw-${{ inputs.tag }}-packages
+          path: release-artifacts/
+          retention-days: 30
