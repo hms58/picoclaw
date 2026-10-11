@@ -56,6 +56,18 @@ jobs:
           cache: pnpm
           cache-dependency-path: web/frontend/pnpm-lock.yaml
 
+      - name: Repair broken pnpm lockfile
+        shell: bash
+        run: |
+          cd web/frontend
+          set -e
+          echo "Checking frontend dependencies..."
+          if ! pnpm install --frozen-lockfile; then
+            echo "pnpm lockfile is broken or invalid; regenerating..."
+            rm -f pnpm-lock.yaml
+            pnpm install
+          fi
+
       - name: Install zip
         run: sudo apt-get install -y zip
 
